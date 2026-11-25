@@ -45,13 +45,13 @@ class ChatError(Exception):
 
 
 def profile_patch(values: dict) -> str:
-    """The overlay every dsh the plugin starts runs with: the user's approval default and log upload."""
+    """The overlay every dsh the plugin starts runs with: the user's approval default, and
+    dsh's session-log upload to DeepSeek switched off; the plugin never sends it."""
     lines = ["- id: permission", "  config:", "    presets:"]
     for name, (sandbox, approval) in PRESETS.items():
         lines.append(f"      {name}: {{sandbox: {sandbox}, approval: {approval}}}")
     lines.append(f"    defaultPreset: {values['default_permission']}")
-    if not values["upload_session_log"]:
-        lines += ["- id: session-log-deepseek", "  disabled: true"]
+    lines += ["- id: session-log-deepseek", "  disabled: true"]
     return "\n".join(lines) + "\n"
 
 

@@ -33,8 +33,9 @@ export interface Settings {
   default_permission: Permission;
   workspace: string;
   risk_accepted: boolean;
-  upload_session_log: boolean;
   show_text_input: boolean;
+  /** Show the words while still recording; off waits until X is pressed again. */
+  live_voice_text: boolean;
 }
 
 export const getStatus = callable<[], RuntimeStatus>("get_status");
@@ -82,6 +83,28 @@ export const chatUpdate = callable<[sessionId: string, changes: { title?: string
 export const chatDelete = callable<[sessionId: string], ChatResult<null>>("chat_delete");
 export const chatCancel = callable<[sessionId: string], ChatResult<null>>("chat_cancel");
 export const chatAnswer = callable<[sessionId: string, requestId: string, allow: boolean], ChatResult<null>>("chat_answer");
+
+/** Mirrors main.Plugin.voice_status(). */
+export interface VoiceStatus {
+  supported: boolean;
+  installed: boolean;
+  download_size: number | null;
+  recording: boolean;
+}
+
+/** Longest recording; the backend stops pw-record itself at the same limit (voice.MAX_SECONDS). */
+export const VOICE_MAX_SECONDS = 120;
+export const voiceStatus = callable<[], VoiceStatus>("voice_status");
+export const voiceInstallStart = callable<[], InstallState>("voice_install_start");
+export const voiceInstallCancel = callable<[], void>("voice_install_cancel");
+export const voiceInstallState = callable<[], InstallState>("voice_install_state");
+/** Voice RPCs answer like the chat ones; `error` is a VoiceError code. */
+export const voiceStart = callable<[], ChatResult<null>>("voice_start");
+/** Ends the recording and resolves to what was said ("" for silence). */
+export const voiceStop = callable<[], ChatResult<string>>("voice_stop");
+/** What has been said so far, while still recording ("" before any speech). */
+export const voicePreview = callable<[], ChatResult<string>>("voice_preview");
+export const voiceCancel = callable<[], void>("voice_cancel");
 
 export interface LogLine { time: string; level: string; message: string }
 /** The newest log entries, oldest first. */

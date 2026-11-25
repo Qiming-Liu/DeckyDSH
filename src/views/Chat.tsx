@@ -5,7 +5,8 @@ import {
 import { CSSProperties, ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   chatAnswer, chatCancel, chatDelete, chatList, chatNew, ChatItem, ChatMeta, ChatResult, ChatSnapshot, chatSend,
-  chatSnapshot, chatUpdate, getSettings, Permission, saveSettings, Settings,
+  chatSnapshot, chatUpdate, getSettings, Permission, saveSettings, Settings, VOICE_MAX_SECONDS, voiceCancel, voicePreview,
+  voiceStart, voiceStop,
 } from "../utils/backend";
 import { PLUGIN_NAME, useT } from "../utils/i18n";
 import { SETTINGS_ROUTE } from "../utils/routes";
@@ -16,6 +17,8 @@ type T = ReturnType<typeof useT>;
 type Full = Extract<ChatSnapshot, { busy: boolean }>;
 type Tool = Extract<ChatItem, { kind: "tool" }>;
 const POLL_BUSY_MS = 400;
+// Pause between live voice previews; each one transcribes the whole recording so far.
+const LIVE_VOICE_MS = 700;
 // Room left under the panel so Steam's own bottom edge never hides the composer.
 const BOTTOM_GAP = 6;
 // Decky pads the top of a panel; the chat title sits right under the plugin name instead.
@@ -40,8 +43,8 @@ const TITLE_CSS = quickAccessMenuClasses?.Title ? `.${quickAccessMenuClasses.Tit
 
 function capitalize(text: string) { return text.charAt(0).toUpperCase() + text.slice(1); }
 
-function errorText(t: T, result: Extract<ChatResult<unknown>, { ok: false }>) {
-  const key = `chatError${capitalize(result.error)}` as Parameters<T>[0];
+function errorText(t: T, result: Extract<ChatResult<unknown>, { ok: false }>, prefix = "chatError") {
+  const key = `${prefix}${capitalize(result.error)}` as Parameters<T>[0];
   const text = t(key, { detail: result.detail });
   return text === key ? result.detail : text;
 }
@@ -80,6 +83,12 @@ export default function Chat() {
   const [busySince, setBusySince] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [menu, setMenu] = useState<"session" | "history" | "permission" | "add" | null>(null);
+  // Push-to-talk: X starts listening, X again stops and the words land in the draft.
+  const [voice, setVoice] = useState<"idle" | "recording" | "recognizing">("idle");
+  const [recordSince, setRecordSince] = useState<number | null>(null);
+  // Words heard so far while recording, when live voice text is on.
+  const [heard, setHeard] = useState("");
+  const recording = useRef(false);
   const version = useRef(0);
   const root = useRef<HTMLDivElement>(null);
   const list = useRef<HTMLDivElement>(null);
@@ -153,6 +162,31 @@ export default function Chat() {
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, [snapshot?.busy]);
+
+  useEffect(() => {
+    if (voice !== "recording") return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [voice]);
+
+  // Live voice text: ask again only after each answer, so one preview runs at a time.
+  const liveVoice = settings?.live_voice_text ?? true;
+  useEffect(() => {
+    if (voice !== "recording" || !liveVoice) return;
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      const result = await voicePreview().catch(() => null);
+      if (!active) return;
+      if (result?.ok && result.value) setHeard(result.value);
+      timer = setTimeout(() => { void poll(); }, LIVE_VOICE_MS);
+    };
+    timer = setTimeout(() => { void poll(); }, LIVE_VOICE_MS);
+    return () => { active = false; clearTimeout(timer); };
+  }, [voice, liveVoice]);
+
+  // Leaving the panel drops an unfinished recording; nothing is kept.
+  useEffect(() => () => { if (recording.current) void voiceCancel(); }, []);
 
   useEffect(() => {
     if (!current || !snapshot?.busy) return;
@@ -265,7 +299,38 @@ export default function Chat() {
     { label: t("addConnector"), icon: ICONS.plug, disabled: true },
   ];
 
-  const talk = () => setError(t("voiceUnavailable"));
+  const talk = async () => {
+    if (voice === "recognizing") return;
+    if (voice === "idle") {
+      setError(null);
+      const started = await voiceStart();
+      if (!started.ok) {
+        setError(started.error === "not_installed" ? t("voiceUnavailable") : errorText(t, started, "voiceError"));
+        return;
+      }
+      recording.current = true;
+      setHeard("");
+      setRecordSince(Date.now());
+      setNow(Date.now());
+      setVoice("recording");
+      return;
+    }
+    recording.current = false;
+    setVoice("recognizing");
+    const result = await voiceStop();
+    setVoice("idle");
+    setHeard("");
+    setRecordSince(null);
+    if (!result.ok) { setError(errorText(t, result, "voiceError")); return; }
+    const words = result.value.trim();
+    if (!words) { setError(t("voiceNothing")); return; }
+    setDraft(previous => previous.trim() ? `${previous.trim()} ${words}` : words);
+  };
+  const listened = recordSince ? Math.max(0, Math.floor((now - recordSince) / 1000)) : 0;
+  // The backend ends pw-record at the limit itself; stop here too, so the words still arrive.
+  useEffect(() => {
+    if (voice === "recording" && listened >= VOICE_MAX_SECONDS) void talk();
+  }, [voice, listened]);
   const textInput = settings?.show_text_input ?? false;
   const pending = snapshot?.items.find((item): item is Extract<ChatItem, { kind: "permission" }> =>
     item.kind === "permission" && item.state === "pending");
@@ -279,12 +344,12 @@ export default function Chat() {
   };
   // X answers yes or talks; Y answers no, stops a running turn, or starts a chat.
   // B stays Steam's Back, so a running turn never traps the player in the panel.
-  const xAction = pending ? () => answer(true) : talk;
+  const xAction = pending ? () => answer(true) : () => { void talk(); };
   const yAction = pending ? () => answer(false) : busy ? stop : () => { void startChat(); };
-  const xLabel = pending ? t("chatAllow") : t("voiceTalk");
+  const xLabel = pending ? t("chatAllow") : voice === "recording" ? t("voiceStop") : t("voiceTalk");
   const yLabel = pending ? t("chatReject") : busy ? t("chatStop") : t("padNewChat");
   const elapsed = busySince ? Math.max(0, Math.floor((now - busySince) / 1000)) : 0;
-  const clock = `${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, "0")}`;
+  const clock = minutes(elapsed);
   const contextUsed = usage && usage.size > 0 ? `${Math.round(usage.used / usage.size * 100)}%` : "";
   const model = shortModel(snapshot?.model ?? meta?.model ?? "");
   const modelLine = [contextUsed, model].filter(Boolean).join(" · ");
@@ -336,6 +401,12 @@ export default function Chat() {
           onClick={() => setFiles(previous => previous.filter(entry => entry !== path))}
           style={{ width: "auto", minWidth: 0, height: 24, padding: "0 8px", fontSize: 12, background: colors.button }}>{basename(path)} ✕</DialogButton>)}
       </Focusable>}
+      {voice !== "idle" && heard && <div aria-live="polite" style={{ border: "1px dashed rgba(255,255,255,.18)", borderRadius: 4, padding: "4px 8px", fontSize: 13, lineHeight: 1.45, maxHeight: 80, overflowY: "auto", color: colors.muted, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{heard}</div>}
+      {!textInput && !busy && draft.trim() && <Focusable flow-children="horizontal" style={{ display: "flex", alignItems: "flex-start", gap: 4, border: "1px solid rgba(255,255,255,.14)", borderRadius: 4, background: "rgba(0,0,0,.35)", padding: "4px 4px 4px 8px" }}>
+        <div style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.45, maxHeight: 80, overflowY: "auto", whiteSpace: "pre-wrap", overflowWrap: "anywhere", alignSelf: "center" }}>{draft}</div>
+        <IconButton label={t("voiceClear")} onClick={() => setDraft("")}><path d="M6 6l12 12M18 6 6 18" /></IconButton>
+        <RoundButton label={t("voiceSend")} background={colors.soft} color="#0e141b" size={32} onClick={() => { void send(); }}><path d="M12 19V5M6 11l6-6 6 6" /></RoundButton>
+      </Focusable>}
       {textInput && modelLine && <div style={{ ...mono, textAlign: "right", fontSize: 11, color: colors.dim, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{modelLine}</div>}
       <Focusable flow-children="horizontal" style={{ display: "flex", alignItems: "center", gap: 4 }}>
         {/* The two small buttons sit close together, apart from the talk button. */}
@@ -358,14 +429,24 @@ export default function Chat() {
               <div style={{ flex: 1, minWidth: 0, border: "1px solid rgba(255,255,255,.14)", borderRadius: 4, background: "rgba(0,0,0,.35)", padding: "4px 8px" }}>
                 <TextField {...{ placeholder: t("chatPlaceholder") }} value={draft} onChange={event => setDraft(event.currentTarget.value)} />
               </div>
-              {draft.trim() || files.length
-                ? <RoundButton label={t("chatSend")} background={colors.soft} color="#0e141b" onClick={() => { void send(); }}><path d="M12 19V5M6 11l6-6 6 6" /></RoundButton>
-                : <RoundButton label={t("voiceTalk")} background={colors.soft} color="#0e141b" onClick={talk}>{ICONS.mic}</RoundButton>}
+              {voice === "recording"
+                ? <RoundButton label={t("voiceStop")} background={colors.danger} color={colors.text} onClick={() => { void talk(); }}>{ICONS.stop}</RoundButton>
+                : voice === "recognizing"
+                  ? <RoundButton label={t("voiceRecognizing")} background={colors.soft} color="#0e141b" disabled onClick={() => undefined}>{ICONS.mic}</RoundButton>
+                  : draft.trim() || files.length
+                    ? <RoundButton label={t("chatSend")} background={colors.soft} color="#0e141b" onClick={() => { void send(); }}><path d="M12 19V5M6 11l6-6 6 6" /></RoundButton>
+                    : <RoundButton label={t("voiceTalk")} background={colors.soft} color="#0e141b" onClick={() => { void talk(); }}>{ICONS.mic}</RoundButton>}
             </>
-            : <DialogButton className="dsh-pill" onClick={talk}
-              style={{ flex: "0 0 auto", width: "auto", minWidth: 0, height: 40, padding: "0 18px", borderRadius: 20, background: colors.soft, color: "#0e141b", fontSize: 14, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, whiteSpace: "nowrap" }}>
-              <Icon size={17}>{ICONS.mic}</Icon>{t("voiceBefore")}<Glyph letter="X" dark size={18} />{t("voiceAfter")}
-            </DialogButton>}
+            : voice === "recording"
+              ? <DialogButton className="dsh-pill" onClick={() => { void talk(); }}
+                style={{ flex: "0 0 auto", width: "auto", minWidth: 0, height: 40, padding: "0 18px", borderRadius: 20, background: colors.danger, color: colors.text, fontSize: 14, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, whiteSpace: "nowrap" }}>
+                <Icon size={15}>{ICONS.stop}</Icon>{t("voiceListening", { time: minutes(listened) })}<Glyph letter="X" size={18} />
+              </DialogButton>
+              : <DialogButton className="dsh-pill" disabled={voice === "recognizing"} onClick={() => { void talk(); }}
+                style={{ flex: "0 0 auto", width: "auto", minWidth: 0, height: 40, padding: "0 18px", borderRadius: 20, background: colors.soft, color: "#0e141b", fontSize: 14, fontWeight: 700, opacity: voice === "recognizing" ? 0.7 : 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, whiteSpace: "nowrap" }}>
+                <Icon size={17}>{ICONS.mic}</Icon>
+                {voice === "recognizing" ? t("voiceRecognizing") : <>{t("voiceBefore")}<Glyph letter="X" dark size={18} />{t("voiceAfter")}</>}
+              </DialogButton>}
         {/* Voice mode keeps the model on the button row; the shorter talk button leaves it room. */}
         {!textInput && modelLine && <div style={{ ...mono, flex: busy ? "0 0 auto" : 1, minWidth: 0, display: "flex", flexDirection: "column", alignItems: "flex-end", fontSize: 11, lineHeight: 1.3, color: colors.dim, whiteSpace: "nowrap" }}>
           {model && <span>{model}</span>}
@@ -422,8 +503,11 @@ const ICONS = {
   file: <><path d="M6 3h8l4 4v14H6z" /><path d="M14 3v4h4" /></>,
   camera: <><rect x="3" y="6" width="18" height="14" rx="2" /><circle cx="12" cy="13" r="3.5" /><path d="M8 6l1.5-2h5L16 6" /></>,
   plug: <path d="M9 2v5M15 2v5M6 7h12v4a6 6 0 0 1-12 0zM12 17v5" />,
+  stop: <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none" />,
   mic: <><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5 11a7 7 0 0 0 14 0M12 18v3" /></>,
 };
+
+function minutes(seconds: number) { return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`; }
 
 function basename(path: string) { return path.split("/").pop() || path; }
 

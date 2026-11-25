@@ -166,13 +166,12 @@ class ChatTest(unittest.TestCase):
         self.assertEqual(prompt, [{"type": "resource_link", "uri": "file:///home/deck/notes.txt", "name": "notes.txt"}])
         self.assertEqual(self.service.list()[0]["title"], "notes.txt")
 
-    def test_profile_patch_carries_the_approval_default_and_log_choice(self):
+    def test_profile_patch_carries_the_approval_default_and_never_uploads_logs(self):
         values = dict(plugin_settings.DEFAULTS, default_permission="danger-full-access")
         patch = chat.profile_patch(values)
         self.assertIn("defaultPreset: danger-full-access", patch)
         self.assertIn("danger-full-access: {sandbox: danger-full-access, approval: never}", patch)
         self.assertIn("- id: session-log-deepseek\n  disabled: true", patch)
-        self.assertNotIn("session-log-deepseek", chat.profile_patch(dict(values, upload_session_log=True)))
 
 
 if __name__ == "__main__":

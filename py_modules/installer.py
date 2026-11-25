@@ -48,6 +48,10 @@ def dsh_environment() -> dict:
 
 
 class Installer:
+    # Names the install in the log.
+    LABEL = "dsh runtime"
+    THREAD = "dsh-install"
+
     def __init__(self, manifest: dict | None = None, platform: str | None = None,
                  opener=net.open_url, smoke=None):
         self._manifest = manifest
@@ -73,7 +77,7 @@ class Installer:
                 return dict(self._state)
             self._cancel.clear()
             self._state = {"phase": "downloading", "done": 0, "total": 0, "error": None}
-            self._thread = threading.Thread(target=self._run, name="dsh-install", daemon=True)
+            self._thread = threading.Thread(target=self._run, name=self.THREAD, daemon=True)
             self._thread.start()
             return dict(self._state)
 
@@ -101,11 +105,11 @@ class Installer:
             self._set(phase="cancelled")
         except InstallError as error:
             import decky
-            decky.logger.warning("dsh runtime install failed (%s): %s", error.code, error)
+            decky.logger.warning("%s install failed (%s): %s", self.LABEL, error.code, error)
             self._set(phase="error", error=error.code)
         except Exception:  # noqa: BLE001  Any surprise must end the install, not the plugin.
             import decky
-            decky.logger.exception("dsh runtime install failed")
+            decky.logger.exception("%s install failed", self.LABEL)
             self._set(phase="error", error="unexpected")
 
     def _install(self) -> None:
@@ -136,38 +140,57 @@ class Installer:
 
     def _download(self, asset: dict) -> Path:
         """Fetch the wheel into DOWNLOAD_DIR, continuing a partial file where the server allows it."""
-        target = paths.DOWNLOAD_DIR / asset["file"]
-        if target.is_file() and target.stat().st_size == asset["size"]:
-            self._set(done=asset["size"], total=asset["size"])
-            return target
-        part = target.with_name(target.name + ".part")
-        offset = part.stat().st_size if part.is_file() else 0
-        if offset >= asset["size"]:
-            part.unlink()
-            offset = 0
-        request = urllib.request.Request(asset["url"], headers={"User-Agent": "DeckyDSH"})
-        if offset:
-            request.add_header("Range", f"bytes={offset}-")
-        try:
-            with self._open(request, timeout=NETWORK_TIMEOUT) as response:
-                if offset and getattr(response, "status", 200) != 206:
-                    offset = 0  # The server ignored the range: start over.
-                self._set(done=offset, total=asset["size"])
-                with open(part, "ab" if offset else "wb") as out:
-                    while chunk := response.read(CHUNK):
-                        if self._cancel.is_set():
-                            raise Cancelled()
-                        out.write(chunk)
-                        offset += len(chunk)
-                        self._set(done=offset)
-        except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
-            raise InstallError("network", str(error)) from error
-        except OSError as error:
-            raise InstallError("disk_space" if error.errno == 28 else "network", str(error)) from error
-        if offset != asset["size"]:
-            raise InstallError("network", "incomplete download")
-        os.replace(part, target)
+        self._set(done=0, total=asset["size"])
+        return download([asset["url"]], paths.DOWNLOAD_DIR / asset["file"], asset["size"], self._open,
+                        self._cancel, lambda done: self._set(done=done))
+
+
+def download(urls: list[str], target: Path, size: int, opener, cancel: threading.Event, progress) -> Path:
+    """Fetch `size` bytes into `target`, trying each URL in turn and continuing a partial file
+    where the server allows it. `progress(bytes_so_far)` follows the download."""
+    if target.is_file() and target.stat().st_size == size:
+        progress(size)
         return target
+    error = InstallError("network", "no download source")
+    for url in urls:
+        try:
+            _download_from(url, target, size, opener, cancel, progress)
+            return target
+        except InstallError as failed:
+            if failed.code != "network":
+                raise
+            error = failed
+    raise error
+
+
+def _download_from(url: str, target: Path, size: int, opener, cancel: threading.Event, progress) -> None:
+    part = target.with_name(target.name + ".part")
+    offset = part.stat().st_size if part.is_file() else 0
+    if offset >= size:
+        part.unlink()
+        offset = 0
+    request = urllib.request.Request(url, headers={"User-Agent": "DeckyDSH"})
+    if offset:
+        request.add_header("Range", f"bytes={offset}-")
+    try:
+        with opener(request, timeout=NETWORK_TIMEOUT) as response:
+            if offset and getattr(response, "status", 200) != 206:
+                offset = 0  # The server ignored the range: start over.
+            progress(offset)
+            with open(part, "ab" if offset else "wb") as out:
+                while chunk := response.read(CHUNK):
+                    if cancel.is_set():
+                        raise Cancelled()
+                    out.write(chunk)
+                    offset += len(chunk)
+                    progress(offset)
+    except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+        raise InstallError("network", str(error)) from error
+    except OSError as error:
+        raise InstallError("disk_space" if error.errno == 28 else "network", str(error)) from error
+    if offset != size:
+        raise InstallError("network", "incomplete download")
+    os.replace(part, target)
 
 
 def sha256_of(path: Path, cancel: threading.Event) -> str:

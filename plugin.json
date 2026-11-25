@@ -5,6 +5,7 @@
   "api_version": 1,
   "publish": {
     "tags": ["ai", "agent", "deepseek"],
-    "description": "Run the DeepSeek Harness (dsh) agent from the Quick Access menu: chat, push-to-talk and screenshots, with per-session approval control."
+    "description": "Run the DeepSeek Harness (dsh) agent from the Quick Access menu: chat by voice or text, with per-chat approval control.",
+    "image": "https://raw.githubusercontent.com/Qiming-Liu/DeckyDSH/main/docs/cover.png"
   }
 }

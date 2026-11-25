@@ -21,9 +21,8 @@ export const BanIcon = icon(<><circle cx="12" cy="12" r="9" /><path d="m5.6 5.6 
 export const ShieldIcon = icon(<path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z" />);
 export const KeyIcon = icon(<><circle cx="8" cy="15" r="4" /><path d="M11 12l9-9M17 6l3 3M15 8l2 2" /></>);
 export const FolderIcon = icon(<path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2z" />);
-export const UploadIcon = icon(<path d="M12 16V4M7 9l5-5 5 5M4 20h16" />);
 export const ChipIcon = icon(<><rect x="6" y="6" width="12" height="12" rx="2" /><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4" /></>);
-export const GitlabIcon = icon(<path d="M22 13.3L18.7 3.3a.4.4 0 00-.8 0l-2.2 6.7H8.3L6.1 3.3a.4.4 0 00-.8 0L2 13.3a.7.7 0 00.3.8L12 21l9.7-6.9a.7.7 0 00.3-.8z" />);
+export const GithubIcon = icon(<path d="M9 19c-4 1.3-4-2-6-2.5M15 21v-3.5c0-1 .1-1.4-.5-2 2.8-.3 5.5-1.4 5.5-6a4.6 4.6 0 00-1.3-3.2 4.2 4.2 0 00-.1-3.2s-1-.3-3.3 1.3a11.4 11.4 0 00-6 0C7 2.8 6 3.1 6 3.1a4.2 4.2 0 00-.1 3.2A4.6 4.6 0 004.6 9.5c0 4.6 2.7 5.7 5.5 6-.6.6-.6 1.2-.5 2V21" />);
 export const BilibiliIcon = icon(<><rect x="3" y="6" width="18" height="14" rx="3" /><path d="M8 3l3 3M16 3l-3 3M9 12v2M15 12v2" /></>);
 
 /** The plugin's glyph: a speech bubble with a sound wave, in the current colour. */
@@ -39,5 +38,7 @@ export function PluginMark({ size = 40 }: { size?: number }) {
     <PluginGlyph size={size * 0.6} />
   </span>;
 }
+export const MicIcon = icon(<><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5 11a7 7 0 0 0 14 0M12 18v3" /></>);
+export const WaveIcon = icon(<path d="M3 12h2M7 8v8M11 5v14M15 8v8M19 11v2" />);
 export const DownloadIcon = icon(<path d="M12 4v12M7 11l5 5 5-5M4 20h16" />, 2.2);
 export const TrashIcon = icon(<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" />);

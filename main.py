@@ -15,11 +15,14 @@ import installer  # noqa: E402
 import plugin_log  # noqa: E402
 import runtime  # noqa: E402
 import plugin_settings  # noqa: E402
+import voice  # noqa: E402
 
 # Decky kills a plugin still running five seconds after asking it to stop.
 UNLOAD_WAIT = 3.0
 INSTALLER = installer.Installer()
 CHAT = chat.ChatService()
+VOICE_INSTALLER = voice.VoiceInstaller()
+RECORDER = voice.Recorder()
 LOG = plugin_log.PluginLog(decky.DECKY_PLUGIN_LOG_DIR, "DeckyDSH")
 
 
@@ -32,6 +35,15 @@ async def _chat_call(function, *args) -> dict:
         return {"ok": False, "error": error.code, "detail": str(error)[:300]}
 
 
+async def _voice_call(function, *args) -> dict:
+    """Run a voice request off the event loop; a refusal comes back as data, not an exception."""
+    try:
+        return {"ok": True, "value": await asyncio.to_thread(function, *args)}
+    except voice.VoiceError as error:
+        decky.logger.warning("voice request failed (%s): %s", error.code, error)
+        return {"ok": False, "error": error.code, "detail": str(error)[:300]}
+
+
 # Decky stops a plugin with SIGTERM and then closes its socket. Once the socket
 # is closed, Decky's read loop in this process (decky-loader 3.3.1) spins
 # without yielding, so neither Decky's own SIGTERM callback nor an await in
@@ -39,8 +51,14 @@ async def _chat_call(function, *args) -> dict:
 # never waits on the event loop: it runs on this thread, within that limit.
 def _stop_background_work() -> None:
     CHAT.stop()
-    if not INSTALLER.close(UNLOAD_WAIT):
+    RECORDER.cancel()
+    # Both installs are told to stop first, so their waits overlap within UNLOAD_WAIT.
+    INSTALLER.cancel()
+    VOICE_INSTALLER.cancel()
+    if not INSTALLER.close(UNLOAD_WAIT / 2):
         decky.logger.warning("DeckyDSH stopped while the runtime install was still stopping")
+    if not VOICE_INSTALLER.close(UNLOAD_WAIT / 2):
+        decky.logger.warning("DeckyDSH stopped while the speech recognition install was still stopping")
     decky.logger.info("DeckyDSH unloaded")
     LOG.detach()
 
@@ -112,6 +130,32 @@ class Plugin:
 
     async def chat_answer(self, session_id: str, request_id: str, allow: bool) -> dict:
         return await _chat_call(CHAT.answer, session_id, request_id, allow)
+
+    async def voice_status(self) -> dict:
+        state = voice.status()
+        state["recording"] = RECORDER.recording()
+        return state
+
+    async def voice_install_start(self) -> dict:
+        return VOICE_INSTALLER.start()
+
+    async def voice_install_cancel(self) -> None:
+        VOICE_INSTALLER.cancel()
+
+    async def voice_install_state(self) -> dict:
+        return VOICE_INSTALLER.snapshot()
+
+    async def voice_start(self) -> dict:
+        return await _voice_call(RECORDER.start)
+
+    async def voice_stop(self) -> dict:
+        return await _voice_call(RECORDER.stop)
+
+    async def voice_preview(self) -> dict:
+        return await _voice_call(RECORDER.preview)
+
+    async def voice_cancel(self) -> None:
+        await asyncio.to_thread(RECORDER.cancel)
 
     async def get_log(self, limit: int = 500) -> list:
         return await asyncio.to_thread(LOG.read, limit)

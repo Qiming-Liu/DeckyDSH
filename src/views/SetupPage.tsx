@@ -195,19 +195,17 @@ function SafetyStep({ t, onBack, onNext }: { t: T; onBack: () => void; onNext: (
   const [values, setValues] = useState<Settings | null>(null);
   const [permission, setPermission] = useState<Permission>("danger-full-access");
   const [accepted, setAccepted] = useState(false);
-  const [uploadLog, setUploadLog] = useState(false);
 
   useEffect(() => {
     void getSettings().then(loaded => {
       setValues(loaded);
       setAccepted(loaded.risk_accepted);
-      setUploadLog(loaded.upload_session_log);
       if (loaded.risk_accepted) setPermission(loaded.default_permission);
     });
   }, []);
 
   const save = async () => {
-    await saveSettings({ default_permission: permission, risk_accepted: accepted, upload_session_log: uploadLog });
+    await saveSettings({ default_permission: permission, risk_accepted: accepted });
     onNext();
   };
   const option = (id: Permission, title: string, desc: string) => {
@@ -240,7 +238,6 @@ function SafetyStep({ t, onBack, onNext }: { t: T; onBack: () => void; onNext: (
     </Focusable>
     <div style={{ maxWidth: 900 }}>
       {permission === "danger-full-access" && <ToggleField label={t("riskConfirm")} checked={accepted} onChange={setAccepted} />}
-      <ToggleField label={t("uploadLog")} description={t("uploadLogDesc")} checked={uploadLog} onChange={setUploadLog} />
     </div>
     {values && <div style={{ maxWidth: 900 }}><Row label={t("workspace")} value={values.workspace} /></div>}
       </>;

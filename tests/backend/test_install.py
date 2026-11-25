@@ -146,8 +146,12 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(settings.load(self.path)["default_permission"], saved["default_permission"])
         self.assertTrue(Path(self.workspace).is_dir())
 
-    def test_session_log_upload_is_off_unless_chosen(self):
-        self.assertFalse(settings.load(self.path)["upload_session_log"])
+    def test_the_old_default_workspace_moves_to_the_new_one(self):
+        self.path.write_text(json.dumps({"workspace": str(paths.OLD_DEFAULT_WORKSPACE), "upload_session_log": True}),
+                             encoding="utf-8")
+        self.assertEqual(settings.load(self.path)["workspace"], str(paths.DEFAULT_WORKSPACE))
+        self.assertTrue(settings.load(self.path)["live_voice_text"])
+        self.assertNotIn("upload_session_log", settings.load(self.path))
 
 
 if __name__ == "__main__":

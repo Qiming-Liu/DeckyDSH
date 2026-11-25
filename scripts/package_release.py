@@ -28,7 +28,8 @@ def stage(destination: Path) -> None:
     shutil.copytree(ROOT / "py_modules", destination / "py_modules",
                     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
     (destination / "runtime").mkdir()
-    shutil.copy2(ROOT / "runtime" / "manifest.json", destination / "runtime" / "manifest.json")
+    for name in ("manifest.json", "voice.json"):
+        shutil.copy2(ROOT / "runtime" / name, destination / "runtime" / name)
     (destination / "dist").mkdir()
     shutil.copy2(ROOT / "dist" / "index.js", destination / "dist" / "index.js")
     # The downloaded runtime is DeepSeek Harness; ship its license with the plugin.

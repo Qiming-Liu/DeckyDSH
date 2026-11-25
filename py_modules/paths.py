@@ -17,7 +17,12 @@ DOWNLOAD_DIR = RUNTIME_DIR / ".download"
 STAGING_DIR = RUNTIME_DIR / ".staging"
 # DSH_HOME for every dsh the plugin starts, separate from the user's own ~/.dsh.
 DSH_HOME = DATA_DIR / "dsh"
-DEFAULT_WORKSPACE = USER_HOME / "DeckyDSH-workspace"
+DEFAULT_WORKSPACE = USER_HOME / "DeckyDSH"
+# The default before 0.9.1; a stored copy of it follows the new default.
+OLD_DEFAULT_WORKSPACE = USER_HOME / "DeckyDSH-workspace"
+# Speech recognition: the pinned sherpa-onnx engine, the SenseVoice model and recordings.
+VOICE_MANIFEST = PLUGIN_DIR / "runtime" / "voice.json"
+VOICE_DIR = DATA_DIR / "voice"
 
 
 def runtime_dir(version: str) -> Path:
