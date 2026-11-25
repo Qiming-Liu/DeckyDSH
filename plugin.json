@@ -1,0 +1,10 @@
+{
+  "name": "DeckyDSH",
+  "author": "Qiming-Liu",
+  "flags": ["debug"],
+  "api_version": 1,
+  "publish": {
+    "tags": ["ai", "agent", "deepseek"],
+    "description": "Run the DeepSeek Harness (dsh) agent from the Quick Access menu: chat, push-to-talk and screenshots, with per-session approval control."
+  }
+}
