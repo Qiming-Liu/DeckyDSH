@@ -12,9 +12,11 @@ import api_key  # noqa: E402
 import chat  # noqa: E402
 import decky  # noqa: E402
 import installer  # noqa: E402
+import key_handoff  # noqa: E402
 import plugin_log  # noqa: E402
 import runtime  # noqa: E402
 import plugin_settings  # noqa: E402
+import uninstall_cleanup  # noqa: E402
 import voice  # noqa: E402
 
 # Decky kills a plugin still running five seconds after asking it to stop.
@@ -24,6 +26,7 @@ CHAT = chat.ChatService()
 VOICE_INSTALLER = voice.VoiceInstaller()
 RECORDER = voice.Recorder()
 LOG = plugin_log.PluginLog(decky.DECKY_PLUGIN_LOG_DIR, "DeckyDSH")
+KEY_HANDOFF = key_handoff.KeyHandoff(on_saved=CHAT.restart)
 
 
 async def _chat_call(function, *args) -> dict:
@@ -50,6 +53,7 @@ async def _voice_call(function, *args) -> dict:
 # _unload is guaranteed to run before the five-second kill. Stopping therefore
 # never waits on the event loop: it runs on this thread, within that limit.
 def _stop_background_work() -> None:
+    KEY_HANDOFF.stop()
     CHAT.stop()
     RECORDER.cancel()
     # Both installs are told to stop first, so their waits overlap within UNLOAD_WAIT.
@@ -59,6 +63,8 @@ def _stop_background_work() -> None:
         decky.logger.warning("DeckyDSH stopped while the runtime install was still stopping")
     if not VOICE_INSTALLER.close(UNLOAD_WAIT / 2):
         decky.logger.warning("DeckyDSH stopped while the speech recognition install was still stopping")
+    # Deletes the runtime and speech recognition if this stop was an uninstall; see uninstall_cleanup.
+    uninstall_cleanup.schedule()
     decky.logger.info("DeckyDSH unloaded")
     LOG.detach()
 
@@ -76,6 +82,11 @@ class Plugin:
     async def get_status(self) -> dict:
         status = runtime.status()
         status["has_api_key"] = api_key.has_key()
+        # Voice is the only input, so setup is not finished until speech recognition is in.
+        speech = voice.status()
+        status["voice_supported"] = speech["supported"]
+        status["voice_installed"] = speech["installed"]
+        status["voice_download_size"] = speech["download_size"]
         status["plugin_version"] = decky.DECKY_PLUGIN_VERSION
         return status
 
@@ -99,6 +110,16 @@ class Plugin:
         CHAT.restart()
         return True
 
+    # The phone hand-off for the key step: start shows a QR code, the step polls state.
+    async def key_handoff_start(self, language: str = "en") -> dict:
+        return await asyncio.to_thread(KEY_HANDOFF.start, language)
+
+    async def key_handoff_state(self) -> dict:
+        return KEY_HANDOFF.snapshot()
+
+    async def key_handoff_stop(self) -> None:
+        KEY_HANDOFF.stop()
+
     async def get_settings(self) -> dict:
         return plugin_settings.load()
 
@@ -115,6 +136,9 @@ class Plugin:
 
     async def chat_snapshot(self, session_id: str, version: int) -> dict:
         return await _chat_call(CHAT.snapshot, session_id, version)
+
+    async def chat_prepare(self, session_id: str) -> dict:
+        return await _chat_call(CHAT.prepare, session_id)
 
     async def chat_send(self, session_id: str, text: str, files: list | None = None) -> dict:
         return await _chat_call(CHAT.send, session_id, text, files)
@@ -153,6 +177,9 @@ class Plugin:
 
     async def voice_preview(self) -> dict:
         return await _voice_call(RECORDER.preview)
+
+    async def voice_levels(self) -> list:
+        return await asyncio.to_thread(RECORDER.levels)
 
     async def voice_cancel(self) -> None:
         await asyncio.to_thread(RECORDER.cancel)

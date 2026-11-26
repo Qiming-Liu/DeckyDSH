@@ -42,3 +42,11 @@ export const MicIcon = icon(<><rect x="9" y="3" width="6" height="11" rx="3" /><
 export const WaveIcon = icon(<path d="M3 12h2M7 8v8M11 5v14M15 8v8M19 11v2" />);
 export const DownloadIcon = icon(<path d="M12 4v12M7 11l5 5 5-5M4 20h16" />, 2.2);
 export const TrashIcon = icon(<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" />);
+export const CheckIcon = icon(<path d="M5 12.5l4.5 4.5L19 7.5" />, 2.4);
+export const GlobeIcon = icon(<><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3c2.5 2.7 3.8 5.7 3.8 9s-1.3 6.3-3.8 9c-2.5-2.7-3.8-5.7-3.8-9S9.5 5.7 12 3z" /></>);
+export const LockIcon = icon(<><rect x="5" y="11" width="14" height="10" rx="2" /><path d="M8 11V8a4 4 0 0 1 8 0v3" /></>);
+export const PackageIcon = icon(<><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z" /><path d="M4 7.5l8 4.5 8-4.5M12 12v9" /></>);
+export const TerminalIcon = icon(<><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M7 9l3 3-3 3M13 15h4" /></>);
+export const RestartIcon = icon(<path d="M4 12a8 8 0 1 0 2.4-5.7M4 4v4h4" />);
+export const PhoneIcon =icon(<><rect x="7" y="2.5" width="10" height="19" rx="2" /><path d="M11 18.5h2" /></>);
+export const FlagIcon =icon(<path d="M5 21V4M5 4h11l-2 4 2 4H5" />);

@@ -1,12 +1,12 @@
 import { FileSelectionType, openFilePicker, toaster } from "@decky/api";
 import {
-  ConfirmModal, DialogButton, Focusable, GamepadButton, Navigation, quickAccessMenuClasses, showModal, TextField,
+  DialogButton, Focusable, GamepadButton, Navigation, quickAccessMenuClasses, TextField,
 } from "@decky/ui";
 import { CSSProperties, ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
-  chatAnswer, chatCancel, chatDelete, chatList, chatNew, ChatItem, ChatMeta, ChatResult, ChatSnapshot, chatSend,
-  chatSnapshot, chatUpdate, getSettings, Permission, saveSettings, Settings, VOICE_MAX_SECONDS, voiceCancel, voicePreview,
-  voiceStart, voiceStop,
+  chatAnswer, chatCancel, chatDelete, chatList, chatNew, ChatItem, ChatMeta, chatPrepare, ChatResult, ChatSnapshot, chatSend,
+  chatSnapshot, chatUpdate, getSettings, Permission, saveSettings, Settings, VOICE_MAX_SECONDS, voiceCancel, voiceLevels,
+  voicePreview, voiceStart, voiceStop,
 } from "../utils/backend";
 import { PLUGIN_NAME, useT } from "../utils/i18n";
 import { SETTINGS_ROUTE } from "../utils/routes";
@@ -19,6 +19,9 @@ type Tool = Extract<ChatItem, { kind: "tool" }>;
 const POLL_BUSY_MS = 400;
 // Pause between live voice previews; each one transcribes the whole recording so far.
 const LIVE_VOICE_MS = 700;
+const NOTICE_MS = 3500;
+const LEVELS_MS = 120;
+const LEVEL_BARS = 24;
 // Room left under the panel so Steam's own bottom edge never hides the composer.
 const BOTTOM_GAP = 6;
 // Decky pads the top of a panel; the chat title sits right under the plugin name instead.
@@ -49,23 +52,9 @@ function errorText(t: T, result: Extract<ChatResult<unknown>, { ok: false }>, pr
   return text === key ? result.detail : text;
 }
 
-// Anchored in the panel and without hiding Big Picture, a modal opens in the Quick Access window.
-const MODAL_IN_PANEL = { bHideMainWindowForPopouts: false };
-
-function confirm(title: string, body: string, t: T, parent?: EventTarget): Promise<boolean> {
-  return new Promise(resolve => {
-    showModal(<ConfirmModal strTitle={title} strDescription={body} strOKButtonText={t("confirm")}
-      strCancelButtonText={t("cancel")} onOK={() => resolve(true)} onCancel={() => resolve(false)} />, parent, MODAL_IN_PANEL);
-  });
-}
-
-function RenameModal({ t, initial, onSave, closeModal }: { t: T; initial: string; onSave: (title: string) => void; closeModal?: () => void }) {
-  const [value, setValue] = useState(initial);
-  return <ConfirmModal strTitle={t("renameTitle")} strOKButtonText={t("confirm")} strCancelButtonText={t("cancel")}
-    closeModal={closeModal} onOK={() => { if (value.trim()) onSave(value.trim()); }}>
-    <TextField value={value} onChange={event => setValue(event.currentTarget.value)} />
-  </ConfirmModal>;
-}
+// Steam's showModal draws nothing when called from the Quick Access window, so
+// confirmations and renaming are drawn inside the panel, like the menus.
+type PanelDialogSpec = { title: string; body?: string; input?: string; danger?: boolean; onClose: (ok: boolean, value: string) => void };
 
 /** The Quick Access chat, laid out like the design: fixed header and composer, scrolling messages. */
 export default function Chat() {
@@ -73,9 +62,12 @@ export default function Chat() {
   const [chats, setChats] = useState<ChatMeta[]>([]);
   const [current, setCurrent] = useState<string | null>(null);
   const [snapshot, setSnapshot] = useState<Full | null>(null);
-  const [draft, setDraft] = useState("");
   const [files, setFiles] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
+  // Voice problems ("didn't catch that") show briefly above the talk button, not in the chat.
+  const [notice, setNotice] = useState<string | null>(null);
+  // What was just said, shown until dsh has it in the chat.
+  const [sending, setSending] = useState<string | null>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [open, setOpen] = useState<Record<number, boolean>>({});
   const [height, setHeight] = useState<number | null>(null);
@@ -83,7 +75,11 @@ export default function Chat() {
   const [busySince, setBusySince] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [menu, setMenu] = useState<"session" | "history" | "permission" | "add" | null>(null);
-  // Push-to-talk: X starts listening, X again stops and the words land in the draft.
+  const [dialog, setDialog] = useState<PanelDialogSpec | null>(null);
+  const ask = (title: string, body: string, danger = false) => new Promise<boolean>(resolve => {
+    setDialog({ title, body, danger, onClose: ok => { setDialog(null); resolve(ok); } });
+  });
+  // Push-to-talk: X starts listening, X again sends the words, Y drops them.
   const [voice, setVoice] = useState<"idle" | "recording" | "recognizing">("idle");
   const [recordSince, setRecordSince] = useState<number | null>(null);
   // Words heard so far while recording, when live voice text is on.
@@ -141,19 +137,30 @@ export default function Chat() {
     setSnapshot(result.value);
   };
 
+  // With no chat to show, a new one opens straight away, so the model is on screen
+  // before the first word.
+  const showFirstOrNew = (list: ChatMeta[], except?: string) => {
+    const first = list.find(chat => !chat.archived && chat.id !== except);
+    if (first) setCurrent(first.id);
+    else void startChat();
+  };
+
   useEffect(() => {
     void getSettings().then(setSettings);
-    void loadList().then(list => {
-      const first = list.find(chat => !chat.archived);
-      if (first) setCurrent(first.id);
-    });
+    void loadList().then(list => showFirstOrNew(list));
   }, []);
 
   useEffect(() => {
     version.current = 0;
     setSnapshot(null);
     setOpen({});
-    if (current) void refresh(current, true);
+    setSending(null);
+    if (current) {
+      void refresh(current, true);
+      // dsh starts and loads this chat while the player is still talking; a failure
+      // here shows up when sending instead.
+      void chatPrepare(current).catch(() => undefined);
+    }
   }, [current]);
 
   useEffect(() => {
@@ -185,6 +192,28 @@ export default function Chat() {
     return () => { active = false; clearTimeout(timer); };
   }, [voice, liveVoice]);
 
+  // The recording bar's waveform follows the microphone; asked again only after each answer.
+  const [levels, setLevels] = useState<number[]>([]);
+  useEffect(() => {
+    if (voice !== "recording") { setLevels([]); return; }
+    let active = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      const next = await voiceLevels().catch(() => null);
+      if (!active) return;
+      if (next) setLevels(next);
+      timer = setTimeout(() => { void poll(); }, LEVELS_MS);
+    };
+    void poll();
+    return () => { active = false; clearTimeout(timer); };
+  }, [voice]);
+
+  useEffect(() => {
+    if (!notice) return;
+    const timer = setTimeout(() => setNotice(null), NOTICE_MS);
+    return () => clearTimeout(timer);
+  }, [notice]);
+
   // Leaving the panel drops an unfinished recording; nothing is kept.
   useEffect(() => () => { if (recording.current) void voiceCancel(); }, []);
 
@@ -198,7 +227,7 @@ export default function Chat() {
   useEffect(() => {
     if (list.current) list.current.scrollTop = list.current.scrollHeight;
     updateBar();
-  }, [snapshot?.version, height, error]);
+  }, [snapshot?.version, height, error, sending]);
 
   const startChat = async () => {
     setError(null);
@@ -209,24 +238,25 @@ export default function Chat() {
     return result.value.id;
   };
 
-  const send = async () => {
-    const text = draft.trim();
+  const send = async (text: string) => {
     if (!text && !files.length) return;
     setError(null);
+    // Shown at once; dsh may still be starting or loading the chat.
+    setSending(text);
     const id = current ?? await startChat();
-    if (!id) return;
+    if (!id) { setSending(null); return; }
     const result = await chatSend(id, text, files);
-    if (!result.ok) { setError(errorText(t, result)); return; }
-    setDraft("");
+    if (!result.ok) { setSending(null); setError(errorText(t, result)); return; }
     setFiles([]);
     await refresh(id, true);
+    setSending(null);
     void loadList();
   };
 
   const choosePreset = async (preset: Permission) => {
     const values = settings ?? await getSettings();
     if (preset === "danger-full-access" && !values.risk_accepted
-      && !await confirm(t("riskConfirmTitle"), t("safetyWarning"), t, root.current ?? undefined)) return;
+      && !await ask(t("riskConfirmTitle"), t("safetyWarning"), true)) return;
     const saved = await saveSettings({ default_permission: preset, risk_accepted: values.risk_accepted || preset === "danger-full-access" });
     setSettings(saved);
     if (current && snapshot && !snapshot.items.length && !snapshot.busy) {
@@ -244,7 +274,6 @@ export default function Chat() {
   const full = preset === "danger-full-access";
   const usage = snapshot?.usage;
 
-  const anchor = () => root.current ?? undefined;
   const close = () => setMenu(null);
 
   const sessionItems = (): MenuEntry[] => {
@@ -258,17 +287,19 @@ export default function Chat() {
       "-",
       { label: meta?.starred ? t("menuUnstar") : t("menuStar"), icon: ICONS.star, onSelect: () => { void chatUpdate(id, { starred: !meta?.starred }).then(loadList); } },
       { label: t("menuRename"), icon: ICONS.pencil, onSelect: () => {
-        showModal(<RenameModal t={t} initial={meta?.title ?? ""} onSave={title => { void chatUpdate(id, { title }).then(loadList); }} />, anchor(), MODAL_IN_PANEL);
+        setDialog({ title: t("renameTitle"), input: meta?.title ?? "", onClose: (ok, value) => {
+          setDialog(null);
+          if (ok && value.trim()) void chatUpdate(id, { title: value.trim() }).then(loadList);
+        } });
       } },
       "-",
-      { label: t("menuArchive"), icon: ICONS.archive, onSelect: () => { void chatUpdate(id, { archived: true }).then(async () => { const list = await loadList(); setCurrent(list.find(chat => !chat.archived && chat.id !== id)?.id ?? null); }); } },
+      { label: t("menuArchive"), icon: ICONS.archive, onSelect: () => { void chatUpdate(id, { archived: true }).then(async () => showFirstOrNew(await loadList(), id)); } },
       { label: t("menuDelete"), icon: ICONS.trash, danger: true, onSelect: () => {
-        void confirm(t("deleteTitle"), t("deleteBody"), t, anchor()).then(async ok => {
+        void ask(t("deleteTitle"), t("deleteBody"), true).then(async ok => {
           if (!ok) return;
           const result = await chatDelete(id);
           if (!result.ok) { setError(errorText(t, result)); return; }
-          const list = await loadList();
-          setCurrent(list.find(chat => !chat.archived)?.id ?? null);
+          showFirstOrNew(await loadList(), id);
         });
       } },
     ];
@@ -299,13 +330,14 @@ export default function Chat() {
     { label: t("addConnector"), icon: ICONS.plug, disabled: true },
   ];
 
+  // X starts listening; while listening X sends what was said and Y throws it away.
   const talk = async () => {
-    if (voice === "recognizing") return;
+    if (voice === "recognizing" || busy || sending !== null) return;
     if (voice === "idle") {
-      setError(null);
+      setNotice(null);
       const started = await voiceStart();
       if (!started.ok) {
-        setError(started.error === "not_installed" ? t("voiceUnavailable") : errorText(t, started, "voiceError"));
+        setNotice(started.error === "not_installed" ? t("voiceUnavailable") : errorText(t, started, "voiceError"));
         return;
       }
       recording.current = true;
@@ -321,17 +353,24 @@ export default function Chat() {
     setVoice("idle");
     setHeard("");
     setRecordSince(null);
-    if (!result.ok) { setError(errorText(t, result, "voiceError")); return; }
+    if (!result.ok) { setNotice(errorText(t, result, "voiceError")); return; }
     const words = result.value.trim();
-    if (!words) { setError(t("voiceNothing")); return; }
-    setDraft(previous => previous.trim() ? `${previous.trim()} ${words}` : words);
+    if (!words) { setNotice(t("voiceNothing")); return; }
+    await send(words);
+  };
+  const discard = () => {
+    if (voice !== "recording") return;
+    recording.current = false;
+    void voiceCancel();
+    setVoice("idle");
+    setHeard("");
+    setRecordSince(null);
   };
   const listened = recordSince ? Math.max(0, Math.floor((now - recordSince) / 1000)) : 0;
   // The backend ends pw-record at the limit itself; stop here too, so the words still arrive.
   useEffect(() => {
     if (voice === "recording" && listened >= VOICE_MAX_SECONDS) void talk();
   }, [voice, listened]);
-  const textInput = settings?.show_text_input ?? false;
   const pending = snapshot?.items.find((item): item is Extract<ChatItem, { kind: "permission" }> =>
     item.kind === "permission" && item.state === "pending");
   const answer = (allow: boolean) => {
@@ -342,12 +381,14 @@ export default function Chat() {
     const element = list.current;
     if (element) element.scrollTop += direction * element.clientHeight * 0.85;
   };
-  // X answers yes or talks; Y answers no, stops a running turn, or starts a chat.
-  // B stays Steam's Back, so a running turn never traps the player in the panel.
+  // X answers yes, talks, or sends what was said; Y answers no, stops a running turn,
+  // drops a recording, or starts a chat. B stays Steam's Back, so a running turn never
+  // traps the player in the panel.
+  const listening = voice === "recording";
   const xAction = pending ? () => answer(true) : () => { void talk(); };
-  const yAction = pending ? () => answer(false) : busy ? stop : () => { void startChat(); };
-  const xLabel = pending ? t("chatAllow") : voice === "recording" ? t("voiceStop") : t("voiceTalk");
-  const yLabel = pending ? t("chatReject") : busy ? t("chatStop") : t("padNewChat");
+  const yAction = pending ? () => answer(false) : busy ? stop : listening ? discard : () => { void startChat(); };
+  const xLabel = pending ? t("chatAllow") : listening ? t("voiceSend") : t("voiceTalk");
+  const yLabel = pending ? t("chatReject") : busy ? t("chatStop") : listening ? t("cancel") : t("padNewChat");
   const elapsed = busySince ? Math.max(0, Math.floor((now - busySince) / 1000)) : 0;
   const clock = minutes(elapsed);
   const contextUsed = usage && usage.size > 0 ? `${Math.round(usage.used / usage.size * 100)}%` : "";
@@ -390,27 +431,32 @@ export default function Chat() {
               open={open[block.index] ?? (busy && block.last)} onToggle={() => setOpen(previous => ({ ...previous, [block.index]: !(previous[block.index] ?? (busy && block.last)) }))} />
             : <Item key={block.index} t={t} item={block.item} items={snapshot.items}
               onAnswer={allow => { if (current && block.item.kind === "permission") void chatAnswer(current, block.item.request, allow).then(() => refresh(current)); }} />)}
-        {busy && <div style={{ color: colors.accentText, fontSize: 13 }}>{t("chatThinking")}</div>}
+        {sending !== null && <>
+          <div style={{ alignSelf: "flex-end", maxWidth: "88%", background: "rgba(26,159,255,.18)", border: "1px solid rgba(124,196,255,.25)", borderRadius: 10, padding: "6px 10px", whiteSpace: "pre-wrap", overflowWrap: "anywhere", opacity: .7 }}>{sending}</div>
+          <div style={{ color: colors.accentText, fontSize: 13 }}>{t("chatSending")}</div>
+        </>}
+        {busy && sending === null && <div style={{ color: colors.accentText, fontSize: 13 }}>{t("chatThinking")}</div>}
         {error && <div style={{ color: colors.danger, fontSize: 13 }}>{error}</div>}
       </Focusable>
     </div>
 
-    <div className="dsh-composer" style={{ flexShrink: 0, display: "flex", flexDirection: "column", gap: 4 }}>
+    <div className="dsh-composer" style={{ position: "relative", flexShrink: 0, display: "flex", flexDirection: "column", gap: 4 }}>
+      {notice && <div role="alert" style={{ position: "absolute", left: 0, right: 0, bottom: 48, zIndex: 5, display: "flex", justifyContent: "center", pointerEvents: "none" }}>
+        <div style={{ position: "relative", maxWidth: "90%", background: "#3d4450", color: colors.text, fontSize: 13, lineHeight: 1.4, padding: "6px 12px", borderRadius: 6, boxShadow: "0 6px 18px rgba(0,0,0,.5)", textAlign: "center", overflowWrap: "anywhere" }}>
+          {notice}
+          <span style={{ position: "absolute", left: "50%", bottom: -5, width: 10, height: 10, background: "#3d4450", transform: "translateX(-50%) rotate(45deg)" }} />
+        </div>
+      </div>}
       {files.length > 0 && <Focusable flow-children="horizontal" style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
         {files.map(path => <DialogButton key={path} className="dsh-btn" aria-label={t("removeFile", { name: basename(path) })}
           onClick={() => setFiles(previous => previous.filter(entry => entry !== path))}
           style={{ width: "auto", minWidth: 0, height: 24, padding: "0 8px", fontSize: 12, background: colors.button }}>{basename(path)} ✕</DialogButton>)}
       </Focusable>}
       {voice !== "idle" && heard && <div aria-live="polite" style={{ border: "1px dashed rgba(255,255,255,.18)", borderRadius: 4, padding: "4px 8px", fontSize: 13, lineHeight: 1.45, maxHeight: 80, overflowY: "auto", color: colors.muted, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{heard}</div>}
-      {!textInput && !busy && draft.trim() && <Focusable flow-children="horizontal" style={{ display: "flex", alignItems: "flex-start", gap: 4, border: "1px solid rgba(255,255,255,.14)", borderRadius: 4, background: "rgba(0,0,0,.35)", padding: "4px 4px 4px 8px" }}>
-        <div style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 1.45, maxHeight: 80, overflowY: "auto", whiteSpace: "pre-wrap", overflowWrap: "anywhere", alignSelf: "center" }}>{draft}</div>
-        <IconButton label={t("voiceClear")} onClick={() => setDraft("")}><path d="M6 6l12 12M18 6 6 18" /></IconButton>
-        <RoundButton label={t("voiceSend")} background={colors.soft} color="#0e141b" size={32} onClick={() => { void send(); }}><path d="M12 19V5M6 11l6-6 6 6" /></RoundButton>
-      </Focusable>}
-      {textInput && modelLine && <div style={{ ...mono, textAlign: "right", fontSize: 11, color: colors.dim, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{modelLine}</div>}
       <Focusable flow-children="horizontal" style={{ display: "flex", alignItems: "center", gap: 4 }}>
-        {/* The two small buttons sit close together, apart from the talk button. */}
-        <div style={{ display: "flex", flexShrink: 0 }}>
+        {/* The two small buttons sit close together, apart from the talk button; while
+            recording they make room for the red bar. */}
+        <div style={{ display: listening ? "none" : "flex", flexShrink: 0 }}>
           <IconButton label={t("add")} onClick={() => setMenu("add")} height={40}><path d="M12 5v14M5 12h14" /></IconButton>
           <IconButton label={full ? t("permissionLabelFull") : t("permissionLabelAsk")} onClick={() => setMenu("permission")} height={40} color={full ? colors.warning : colors.soft}>
             {full ? ICONS.ban : ICONS.hand}
@@ -424,31 +470,26 @@ export default function Chat() {
               <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none" />
             </RoundButton>
           </div>
-          : textInput
-            ? <>
-              <div style={{ flex: 1, minWidth: 0, border: "1px solid rgba(255,255,255,.14)", borderRadius: 4, background: "rgba(0,0,0,.35)", padding: "4px 8px" }}>
-                <TextField {...{ placeholder: t("chatPlaceholder") }} value={draft} onChange={event => setDraft(event.currentTarget.value)} />
-              </div>
-              {voice === "recording"
-                ? <RoundButton label={t("voiceStop")} background={colors.danger} color={colors.text} onClick={() => { void talk(); }}>{ICONS.stop}</RoundButton>
-                : voice === "recognizing"
-                  ? <RoundButton label={t("voiceRecognizing")} background={colors.soft} color="#0e141b" disabled onClick={() => undefined}>{ICONS.mic}</RoundButton>
-                  : draft.trim() || files.length
-                    ? <RoundButton label={t("chatSend")} background={colors.soft} color="#0e141b" onClick={() => { void send(); }}><path d="M12 19V5M6 11l6-6 6 6" /></RoundButton>
-                    : <RoundButton label={t("voiceTalk")} background={colors.soft} color="#0e141b" onClick={() => { void talk(); }}>{ICONS.mic}</RoundButton>}
-            </>
-            : voice === "recording"
-              ? <DialogButton className="dsh-pill" onClick={() => { void talk(); }}
-                style={{ flex: "0 0 auto", width: "auto", minWidth: 0, height: 40, padding: "0 18px", borderRadius: 20, background: colors.danger, color: colors.text, fontSize: 14, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, whiteSpace: "nowrap" }}>
-                <Icon size={15}>{ICONS.stop}</Icon>{t("voiceListening", { time: minutes(listened) })}<Glyph letter="X" size={18} />
+          : listening
+            // Recording: a red bar with the live waveform, a round ✕ (Y) to drop it, Send (X).
+            ? <div style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 6 }}>
+              <Waveform levels={levels} time={minutes(listened)} label={t("voiceRecording")} />
+              <RoundButton label={t("cancel")} background={colors.button} color={colors.text} size={36} onClick={discard}>
+                <path d="M6 6l12 12M18 6 6 18" />
+              </RoundButton>
+              <DialogButton className="dsh-pill" onClick={() => { void talk(); }}
+                style={{ flex: "0 0 auto", width: "auto", minWidth: 0, height: 40, padding: "0 12px", borderRadius: 20, background: colors.soft, color: "#0e141b", fontSize: 14, fontWeight: 700, display: "flex", alignItems: "center", gap: 5, whiteSpace: "nowrap" }}>
+                <Glyph letter="X" dark size={18} />{t("voiceSend")}
               </DialogButton>
-              : <DialogButton className="dsh-pill" disabled={voice === "recognizing"} onClick={() => { void talk(); }}
-                style={{ flex: "0 0 auto", width: "auto", minWidth: 0, height: 40, padding: "0 18px", borderRadius: 20, background: colors.soft, color: "#0e141b", fontSize: 14, fontWeight: 700, opacity: voice === "recognizing" ? 0.7 : 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, whiteSpace: "nowrap" }}>
-                <Icon size={17}>{ICONS.mic}</Icon>
-                {voice === "recognizing" ? t("voiceRecognizing") : <>{t("voiceBefore")}<Glyph letter="X" dark size={18} />{t("voiceAfter")}</>}
-              </DialogButton>}
-        {/* Voice mode keeps the model on the button row; the shorter talk button leaves it room. */}
-        {!textInput && modelLine && <div style={{ ...mono, flex: busy ? "0 0 auto" : 1, minWidth: 0, display: "flex", flexDirection: "column", alignItems: "flex-end", fontSize: 11, lineHeight: 1.3, color: colors.dim, whiteSpace: "nowrap" }}>
+            </div>
+            : <DialogButton className="dsh-pill" disabled={voice === "recognizing" || sending !== null} onClick={() => { void talk(); }}
+              style={{ flex: "0 0 auto", width: "auto", minWidth: 0, height: 40, padding: "0 18px", borderRadius: 20, background: colors.soft, color: "#0e141b", fontSize: 14, fontWeight: 700, opacity: voice === "recognizing" || sending !== null ? 0.7 : 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, whiteSpace: "nowrap" }}>
+              <Icon size={17}>{ICONS.mic}</Icon>
+              {voice === "recognizing" ? t("voiceRecognizing") : sending !== null ? t("chatSending")
+                : <>{t("voiceBefore")}<Glyph letter="X" dark size={18} />{t("voiceAfter")}</>}
+            </DialogButton>}
+        {/* The model sits on the button row; the short talk button leaves it room. */}
+        {modelLine && !listening && <div style={{ ...mono, flex: busy ? "0 0 auto" : 1, minWidth: 0, display: "flex", flexDirection: "column", alignItems: "flex-end", fontSize: 11, lineHeight: 1.3, color: colors.dim, whiteSpace: "nowrap" }}>
           {model && <span>{model}</span>}
           {contextUsed && <span>{contextUsed}</span>}
         </div>}
@@ -456,7 +497,28 @@ export default function Chat() {
     </div>
     {menu && <Popover entries={menu === "session" ? sessionItems() : menu === "history" ? historyItems() : menu === "permission" ? permissionItems() : addItems()}
       position={menu === "session" || menu === "history" ? { top: 36 } : { bottom: 84 }} onClose={close} />}
+    {dialog && <PanelDialog t={t} spec={dialog} />}
   </Focusable>;
+}
+
+/** A confirmation (or the rename field) over the panel; B or Cancel closes it. */
+function PanelDialog({ t, spec }: { t: T; spec: PanelDialogSpec }) {
+  const [value, setValue] = useState(spec.input ?? "");
+  const button: CSSProperties = { flex: 1, minWidth: 0, height: 36, padding: 0, fontSize: 14, fontWeight: 700 };
+  return <>
+    <div onClick={() => spec.onClose(false, value)} style={{ position: "absolute", inset: 0, zIndex: 19, background: "rgba(0,0,0,.55)" }} />
+    <Focusable onCancelButton={() => spec.onClose(false, value)} role="dialog" aria-label={spec.title}
+      style={{ position: "absolute", left: 14, right: 14, top: "28%", zIndex: 20, background: "#1f2126", border: "1px solid rgba(255,255,255,.1)", borderRadius: 6, boxShadow: "0 16px 40px rgba(0,0,0,.6)", padding: "14px 14px 12px", display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ fontSize: 16, fontWeight: 700, color: colors.text }}>{spec.title}</div>
+      {spec.body && <div style={{ fontSize: 13, lineHeight: 1.45, color: colors.muted }}>{spec.body}</div>}
+      {spec.input !== undefined && <TextField value={value} onChange={event => setValue(event.currentTarget.value)} />}
+      <Focusable flow-children="horizontal" style={{ display: "flex", gap: 8 }}>
+        <DialogButton className="dsh-btn" onClick={() => spec.onClose(false, value)} style={{ ...button, background: colors.button, color: colors.text }}>{t("cancel")}</DialogButton>
+        <DialogButton className="dsh-btn" {...(spec.input === undefined ? { autoFocus: true, preferredFocus: true } : {})} onClick={() => spec.onClose(true, value)}
+          style={{ ...button, background: spec.danger ? colors.danger : colors.soft, color: spec.danger ? colors.text : "#0e141b" }}>{t("confirm")}</DialogButton>
+      </Focusable>
+    </Focusable>
+  </>;
 }
 
 type MenuEntry = "-" | { label: string; desc?: string; icon?: ReactNode; selected?: boolean; disabled?: boolean; danger?: boolean; onSelect?: () => void };
@@ -503,7 +565,6 @@ const ICONS = {
   file: <><path d="M6 3h8l4 4v14H6z" /><path d="M14 3v4h4" /></>,
   camera: <><rect x="3" y="6" width="18" height="14" rx="2" /><circle cx="12" cy="13" r="3.5" /><path d="M8 6l1.5-2h5L16 6" /></>,
   plug: <path d="M9 2v5M15 2v5M6 7h12v4a6 6 0 0 1-12 0zM12 17v5" />,
-  stop: <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none" />,
   mic: <><rect x="9" y="3" width="6" height="11" rx="3" /><path d="M5 11a7 7 0 0 0 14 0M12 18v3" /></>,
 };
 
@@ -534,6 +595,20 @@ function IconButton({ label, onClick, height = 32, color, children }: { label: s
     style={{ width: 32, minWidth: 32, height, padding: 0, background: "transparent", color: color ?? colors.soft, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
     <Icon size={17}>{children}</Icon>
   </DialogButton>;
+}
+
+/** The red recording bar: the time, then white bars for the microphone's loudness, newest on the right. */
+function Waveform({ levels, time, label }: { levels: number[]; time: string; label: string }) {
+  const bars = levels.length ? levels : Array<number>(LEVEL_BARS).fill(0);
+  return <div role="status" aria-label={`${label} ${time}`} style={{ flex: 1, minWidth: 0, height: 40, boxSizing: "border-box", borderRadius: 20, background: colors.danger, padding: "0 12px", display: "flex", alignItems: "center", gap: 8, overflow: "hidden" }}>
+    <span style={{ ...mono, flexShrink: 0, fontSize: 12, fontWeight: 700, color: "#fff" }}>{time}</span>
+    <svg aria-hidden="true" viewBox={`0 0 ${bars.length * 4} 24`} preserveAspectRatio="none" style={{ flex: 1, minWidth: 0, height: 24 }}>
+      {bars.map((level, index) => {
+        const height = Math.max(2, level * 24);
+        return <rect key={index} x={index * 4 + 1} y={(24 - height) / 2} width={2} height={height} rx={1} fill="#fff" />;
+      })}
+    </svg>
+  </div>;
 }
 
 /** A controller button as Steam draws it: a light disc with the letter. */

@@ -11,7 +11,7 @@ import paths
 # actions) needs Harness's experimental Auto review and is offered later.
 PERMISSIONS = ("workspace-write", "danger-full-access")
 DEFAULTS = {"default_permission": "workspace-write", "workspace": str(paths.DEFAULT_WORKSPACE),
-            "risk_accepted": False, "show_text_input": False, "live_voice_text": True}
+            "risk_accepted": False, "live_voice_text": True}
 
 
 def load(path: Path | None = None) -> dict:
@@ -40,7 +40,7 @@ def save(changes: dict, path: Path | None = None) -> dict:
         raise ValueError("full access needs the risk confirmation")
     if not isinstance(values["workspace"], str) or not os.path.isabs(values["workspace"]):
         raise ValueError("workspace must be an absolute path")
-    for key in ("risk_accepted", "show_text_input", "live_voice_text"):
+    for key in ("risk_accepted", "live_voice_text"):
         values[key] = bool(values[key])
     target = path or paths.SETTINGS_FILE
     target.parent.mkdir(parents=True, exist_ok=True)

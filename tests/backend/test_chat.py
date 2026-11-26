@@ -126,6 +126,15 @@ class ChatTest(unittest.TestCase):
         methods = [method for method, _, _ in FakeDsh.instances[-1].requests]
         self.assertEqual(methods, ["session/resume", "session/prompt"])
 
+    def test_prepare_resumes_ahead_so_sending_does_not_wait(self):
+        session = self.start_chat()
+        reopened = chat.ChatService(FakeDsh, self.chats_dir)
+        reopened.prepare(session)
+        reopened.prepare(session)
+        reopened.send(session, "continue")
+        methods = [method for method, _, _ in FakeDsh.instances[-1].requests]
+        self.assertEqual(methods, ["session/resume", "session/prompt"])
+
     def test_a_second_message_waits_for_the_first(self):
         session = self.start_chat()
         self.service.send(session, "one")

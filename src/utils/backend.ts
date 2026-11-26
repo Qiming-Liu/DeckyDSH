@@ -11,6 +11,9 @@ export interface RuntimeStatus {
   download_size: number | null;
   installed: boolean;
   has_api_key: boolean;
+  voice_supported: boolean;
+  voice_installed: boolean;
+  voice_download_size: number | null;
   plugin_version: string;
 }
 
@@ -33,7 +36,6 @@ export interface Settings {
   default_permission: Permission;
   workspace: string;
   risk_accepted: boolean;
-  show_text_input: boolean;
   /** Show the words while still recording; off waits until X is pressed again. */
   live_voice_text: boolean;
 }
@@ -44,6 +46,15 @@ export const cancelInstall = callable<[], void>("cancel_install");
 export const getInstallState = callable<[], InstallState>("get_install_state");
 export const checkApiKey = callable<[key: string], KeyCheck>("check_api_key");
 export const saveApiKey = callable<[key: string], boolean>("save_api_key");
+
+/** The phone hand-off: a page on the local network that takes the key from a phone. */
+export interface KeyHandoffState {
+  phase: "off" | "waiting" | "saved" | "unavailable";
+  url: string | null;
+}
+export const keyHandoffStart = callable<[language: string], KeyHandoffState>("key_handoff_start");
+export const keyHandoffState = callable<[], KeyHandoffState>("key_handoff_state");
+export const keyHandoffStop = callable<[], void>("key_handoff_stop");
 export const getSettings = callable<[], Settings>("get_settings");
 export const saveSettings = callable<[changes: Partial<Settings>], Settings>("save_settings");
 
@@ -78,6 +89,8 @@ export type ChatSnapshot =
 export const chatList = callable<[], ChatResult<ChatMeta[]>>("chat_list");
 export const chatNew = callable<[], ChatResult<ChatMeta>>("chat_new");
 export const chatSnapshot = callable<[sessionId: string, version: number], ChatResult<ChatSnapshot>>("chat_snapshot");
+/** Starts dsh and loads the chat in the background, so the first send has nothing to wait for. */
+export const chatPrepare = callable<[sessionId: string], ChatResult<null>>("chat_prepare");
 export const chatSend = callable<[sessionId: string, text: string, files: string[]], ChatResult<{ version: number }>>("chat_send");
 export const chatUpdate = callable<[sessionId: string, changes: { title?: string; starred?: boolean; archived?: boolean }], ChatResult<ChatMeta>>("chat_update");
 export const chatDelete = callable<[sessionId: string], ChatResult<null>>("chat_delete");
@@ -105,6 +118,8 @@ export const voiceStop = callable<[], ChatResult<string>>("voice_stop");
 /** What has been said so far, while still recording ("" before any speech). */
 export const voicePreview = callable<[], ChatResult<string>>("voice_preview");
 export const voiceCancel = callable<[], void>("voice_cancel");
+/** Loudness of the last 2.4 s while recording, oldest first, each 0..1. */
+export const voiceLevels = callable<[], number[]>("voice_levels");
 
 export interface LogLine { time: string; level: string; message: string }
 /** The newest log entries, oldest first. */

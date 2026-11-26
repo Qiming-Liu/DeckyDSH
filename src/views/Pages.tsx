@@ -1,22 +1,18 @@
 import { Focusable, ModalRoot, Navigation, showModal, SidebarNavigation, Toggle } from "@decky/ui";
-import qrcode from "qrcode-generator";
-import { ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { AUTHOR_AVATAR } from "../data/avatar";
-import {
-  getSettings, getStatus, InstallState, Permission, RuntimeStatus, saveSettings, Settings, voiceInstallCancel,
-  voiceInstallStart, voiceInstallState, voiceStatus, VoiceStatus,
-} from "../utils/backend";
-import { megabytes } from "../utils/format";
+import { getSettings, getStatus, Permission, RuntimeStatus, saveSettings, Settings } from "../utils/backend";
 import { getLanguage, PLUGIN_NAME, useT } from "../utils/i18n";
 import { readmeUrl } from "../utils/readme";
-import { SETUP_ROUTE } from "../utils/routes";
+import { openSetupFromStart, SETUP_ROUTE } from "../utils/routes";
 import { colors, FOCUS_CSS, FOOTER, mono, PAGE_CSS, STATUS_BAR } from "../utils/theme";
 import {
-  BanIcon, BilibiliIcon, ChevronRightIcon, ChipIcon, DownloadIcon, FolderIcon, GithubIcon, HandIcon, InfoIcon, KeyboardIcon, KeyIcon,
-  MicIcon, PluginMark, ShieldIcon, SlidersIcon, WaveIcon,
+  BanIcon, BilibiliIcon, ChevronRightIcon, FolderIcon, GithubIcon, HandIcon, InfoIcon,
+  PluginMark, RestartIcon, ShieldIcon, SlidersIcon, WaveIcon,
 } from "./icons";
 import { CREAMDECK_LOGO, GCM_LOGO } from "../data/recommended";
 import LogPanel from "./LogPanel";
+import QrCode from "./QrCode";
 import { Button, IconButton, Row, RowGroup, SectionTitle } from "./shell";
 
 type T = ReturnType<typeof useT>;
@@ -75,13 +71,13 @@ export function SettingsPage() {
     <style>{FOCUS_CSS + PAGE_CSS}</style>
     <SidebarNavigation title={title as unknown as string} showTitle pages={[
       { identifier: "general", title: t("settingsGeneral"), hideTitle: true, icon: <SlidersIcon />,
-        content: settings ? <General t={t} settings={settings} status={status} onChange={change} /> : null },
+        content: settings ? <General t={t} settings={settings} onChange={change} /> : null },
       { identifier: "about", title: t("settingsAbout"), hideTitle: true, icon: <InfoIcon />, content: <About t={t} status={status} /> },
     ]} />
   </div>;
 }
 
-function General({ t, settings, status, onChange }: { t: T; settings: Settings; status: RuntimeStatus | null; onChange: (changes: Partial<Settings>) => void }) {
+function General({ t, settings, onChange }: { t: T; settings: Settings; onChange: (changes: Partial<Settings>) => void }) {
   const choose = (preset: Permission) => {
     // Skipping every approval needs the same acknowledgement as in setup.
     if (preset === "danger-full-access" && !settings.risk_accepted) { Navigation.Navigate(SETUP_ROUTE); return; }
@@ -92,10 +88,6 @@ function General({ t, settings, status, onChange }: { t: T; settings: Settings; 
   return <div style={{ padding: "0 8px 16px 0" }}>
     <SectionTitle first>{t("sectionInput")}</SectionTitle>
     <RowGroup>
-      <Row icon={<KeyboardIcon />} title={t("settingTextInput")} description={t("settingTextInputDesc")}>
-        <Toggle value={settings.show_text_input} onChange={value => onChange({ show_text_input: value })} />
-      </Row>
-      <VoiceRow t={t} />
       <Row icon={<WaveIcon />} title={t("settingLiveVoice")} description={t("settingLiveVoiceDesc")}>
         <Toggle value={settings.live_voice_text} onChange={value => onChange({ live_voice_text: value })} />
       </Row>
@@ -111,87 +103,19 @@ function General({ t, settings, status, onChange }: { t: T; settings: Settings; 
 
     <SectionTitle>{t("sectionData")}</SectionTitle>
     <RowGroup>
-      <Row icon={<KeyIcon />} title={t("settingKey")}
-        description={<span style={{ color: status?.has_api_key ? colors.success : colors.warning }}>{status?.has_api_key ? t("saved") : t("notSet")}</span>}>
-        <Button onClick={() => Navigation.Navigate(SETUP_ROUTE)}>{t("settingKeyChange")}</Button>
+      {/* The key, runtime and speech recognition are all changed by going through setup again. */}
+      <Row icon={<RestartIcon />} title={t("settingSetup")} description={t("settingSetupDesc")}>
+        <Button onClick={openSetupFromStart}>{t("settingSetupOpen")}</Button>
       </Row>
       <Row icon={<FolderIcon />} title={t("workspace")} description={<span style={mono}>{settings.workspace}</span>} />
     </RowGroup>
   </div>;
 }
 
-const VOICE_RUNNING = new Set(["downloading", "verifying", "unpacking", "testing"]);
-const VOICE_POLL_MS = 500;
-
-/** Downloads the on-device speech recognizer, with the same progress and pause as the runtime. */
-function VoiceRow({ t }: { t: T }) {
-  const [status, setStatus] = useState<VoiceStatus | null>(null);
-  const [state, setState] = useState<InstallState | null>(null);
-  const running = state !== null && VOICE_RUNNING.has(state.phase);
-
-  useEffect(() => {
-    void voiceStatus().then(setStatus);
-    void voiceInstallState().then(setState);
-  }, []);
-  useEffect(() => {
-    if (!running) return;
-    const timer = setInterval(() => { void voiceInstallState().then(setState); }, VOICE_POLL_MS);
-    return () => clearInterval(timer);
-  }, [running]);
-  useEffect(() => { if (state?.phase === "done") void voiceStatus().then(setStatus); }, [state?.phase]);
-
-  if (!status) return null;
-  const size = megabytes(status.download_size ?? 0);
-  const done = megabytes(state?.done ?? 0);
-  const total = megabytes(state?.total || status.download_size || 0);
-  const percent = state?.total ? Math.min(100, Math.round(state.done / state.total * 100)) : 0;
-  const error = state?.error ?? "unexpected";
-  const progress = !state ? null
-    : state.phase === "downloading" ? `${t("phaseDownloading", { done, total })} · ${percent}%`
-    : state.phase === "verifying" ? t("phaseVerifying")
-    : state.phase === "unpacking" ? t("phaseUnpacking")
-    : state.phase === "testing" ? t("voicePhaseTesting")
-    : state.phase === "cancelled" ? t("phaseCancelled", { done, total })
-    : state.phase === "error" ? (error === "smoke" ? t("voiceErrorSmoke")
-      : t(`error${error.charAt(0).toUpperCase()}${error.slice(1)}` as Parameters<T>[0], { size: megabytes((status.download_size ?? 0) * 2) }))
-    : null;
-  const description = !status.supported ? t("settingVoiceUnsupported")
-    : <span style={{ display: "flex", flexDirection: "column" }}>
-      <span>{t("settingVoiceDesc", { size })}</span>
-      {status.installed && !running
-        ? <span style={{ color: colors.success }}>{t("phaseDone")}</span>
-        : progress && <span style={{ color: state?.phase === "error" ? colors.danger : colors.accentText }}>{progress}</span>}
-    </span>;
-  return <Row icon={<MicIcon />} title={t("settingVoice")} description={description}>
-    {status.supported && !status.installed && (running
-      ? <Button onClick={() => { void voiceInstallCancel(); }}>{t("pause")}</Button>
-      : <Button onClick={() => { void voiceInstallStart().then(setState); }}><DownloadIcon size={16} />
-        {state?.phase === "error" || state?.phase === "cancelled" ? t("retry") : t("download")}</Button>)}
-  </Row>;
-}
-
 /** A new GitLab issue with the details a report needs already filled in. */
 function feedbackUrl(version: string, system: string) {
   const body = [`**Version:** ${version || "?"}`, `**System:** ${system || "?"}`, "", "**What happened:**", "", ""].join("\n");
   return `${REPOSITORY_URL}/issues/new?body=${encodeURIComponent(body)}`;
-}
-
-/** The QR code as one SVG path, drawn locally. */
-function QrCode({ text, label, size }: { text: string; label: string; size: number }) {
-  const { count, path } = useMemo(() => {
-    const code = qrcode(0, "M");
-    code.addData(text, "Byte");
-    code.make();
-    const count = code.getModuleCount();
-    let path = "";
-    for (let row = 0; row < count; row++)
-      for (let column = 0; column < count; column++)
-        if (code.isDark(row, column)) path += `M${column} ${row}h1v1h-1z`;
-    return { count, path };
-  }, [text]);
-  return <div role="img" aria-label={label} style={{ padding: 8, borderRadius: 4, background: "#fff", lineHeight: 0 }}>
-    <svg width={size} height={size} viewBox={`0 0 ${count} ${count}`} shapeRendering="crispEdges" aria-hidden="true"><path d={path} fill="#0e141b" /></svg>
-  </div>;
 }
 
 function FeedbackModal({ t, url, closeModal }: { t: T; url: string; closeModal?: () => void }) {
@@ -221,7 +145,8 @@ function About({ t, status }: { t: T; status: RuntimeStatus | null }) {
   const version = status?.plugin_version ?? "";
   const feedback = feedbackUrl(version, status?.platform ?? "");
   // Two columns as one row, so right from the author links reaches the log.
-  return <Focusable flow-children="row" style={{ padding: "0 8px 16px 0", display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: 24, alignItems: "start" }}>
+  // data-dsh-about lets PAGE_CSS turn off the pane's scrolling on this page only.
+  return <Focusable data-dsh-about="" flow-children="row" style={{ padding: "0 8px 16px 0", display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: 24, alignItems: "start" }}>
     <Focusable flow-children="column" style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
       <Focusable flow-children="row" aria-label={AUTHOR} style={{ padding: "8px 12px", borderRadius: 4, background: "rgba(0,0,0,.28)", display: "flex", alignItems: "center", gap: 12 }}>
         <img src={AUTHOR_AVATAR} alt="" width={44} height={44} style={{ flex: "0 0 44px", borderRadius: 22, objectFit: "cover", background: colors.button }} />
@@ -233,8 +158,6 @@ function About({ t, status }: { t: T; status: RuntimeStatus | null }) {
       <RowGroup>
         <Row icon={<PluginMark />} title={PLUGIN_NAME} description={t("deckyPlugin")}
           aside={version && <span aria-label={t("aboutVersion")} style={{ fontSize: 12, color: colors.muted }}>v{version}</span>} />
-        <Row icon={<ChipIcon size={20} />} title={t("settingRuntime")}
-          description={<span style={{ ...mono, color: status?.installed ? colors.success : colors.warning }}>{status ? `${status.dsh} · ${status.platform}` : ""}</span>} />
         <Row title={t("feedback")} description={t("feedbackHint")}>
           <Button onClick={() => showModal(<FeedbackModal t={t} url={feedback} />)}><GithubIcon size={16} />{t("feedbackIssue")}</Button>
         </Row>
@@ -255,7 +178,7 @@ function About({ t, status }: { t: T; status: RuntimeStatus | null }) {
     {/* The log gets the whole right half, down to the button hints. */}
     <Focusable flow-children="column" style={{ display: "flex", flexDirection: "column", minWidth: 0 }}>
       <SectionTitle first>{t("log")}</SectionTitle>
-      <LogPanel height="calc(100vh - 190px)" />
+      <LogPanel height="calc(100vh - 200px)" />
     </Focusable>
   </Focusable>;
 }

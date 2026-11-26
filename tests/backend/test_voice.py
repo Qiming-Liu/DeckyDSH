@@ -1,7 +1,9 @@
+import array
 import hashlib
 import io
 import shutil
 import subprocess
+import sys
 import tarfile
 import unittest
 import urllib.error
@@ -142,6 +144,24 @@ class RecorderTest(unittest.TestCase):
 
     def recorder(self):
         return voice.Recorder(self.manifest, self.popen, self.fake_run, lambda name, path: f"/usr/bin/{name}", "linux-x64")
+
+    def test_levels_follow_the_end_of_the_recording(self):
+        recorder = self.recorder()
+        self.assertEqual(recorder.levels(), [])
+        recorder.start()
+        window = voice.SAMPLE_RATE // 10
+        # An unfinished WAV as pw-record leaves it: a header, then half a second of silence and a loud tenth.
+        header = b"RIFF\xff\xff\xff\xffWAVEfmt " + bytes(20) + b"data\xff\xff\xff\xff"
+        samples = array.array("h", [0] * (5 * window) + [16384, -16384] * (window // 2))
+        if sys.byteorder != "little":
+            samples.byteswap()
+        recorder.wav.write_bytes(header + samples.tobytes())
+        levels = recorder.levels()
+        self.assertEqual(len(levels), voice.LEVEL_BARS)
+        self.assertEqual(levels[:-1], [0.0] * (voice.LEVEL_BARS - 1))
+        self.assertAlmostEqual(levels[-1], 0.707, places=2)
+        recorder.cancel()
+        self.assertEqual(recorder.levels(), [])
 
     def test_record_then_stop_transcribes_and_deletes_the_recording(self):
         recorder = self.recorder()

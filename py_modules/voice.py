@@ -9,6 +9,7 @@ until it is transcribed.
 """
 from __future__ import annotations
 
+import array
 import hashlib
 import json
 import os
@@ -16,6 +17,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import tarfile
 import threading
 import wave
@@ -31,6 +33,8 @@ SAMPLE_RATE = 16000
 # A recording stops by itself after this long; the frontend shows the same limit.
 MAX_SECONDS = 120
 STOP_TIMEOUT = 3
+# The recording bar's waveform: one bar per tenth of a second.
+LEVEL_BARS = 24
 TRANSCRIBE_TIMEOUT = 90
 SMOKE_TIMEOUT = 60
 THREADS = 2
@@ -377,6 +381,38 @@ class Recorder:
             return transcribe(self.manifest(), snapshot, self._run)
         finally:
             snapshot.unlink(missing_ok=True)
+
+    def levels(self, bars: int = LEVEL_BARS) -> list[float]:
+        """Loudness of the last `bars` tenths of a second, oldest first, each 0..1, for the waveform.
+
+        Reads only the end of what pw-record has written so far, so it is cheap to ask often.
+        """
+        if not self.recording():
+            return []
+        window = SAMPLE_RATE // 10
+        try:
+            with open(self.wav, "rb") as recording:
+                start = recording.read(4096).find(b"data", 12)
+                if start < 0:
+                    return [0.0] * bars
+                begin = start + 8
+                size = recording.seek(0, os.SEEK_END)
+                offset = max(begin, size - bars * window * 2)
+                offset -= (offset - begin) % 2
+                recording.seek(offset)
+                data = recording.read(size - offset)
+        except OSError:
+            return [0.0] * bars
+        samples = array.array("h", data[:len(data) - len(data) % 2])
+        if sys.byteorder != "little":
+            samples.byteswap()
+        heard = []
+        for index in range(0, len(samples), window):
+            chunk = samples[index:index + window]
+            if chunk:
+                peak = max(-min(chunk), max(chunk))
+                heard.append(round(min(1.0, (peak / 32768) ** 0.5), 3))  # square root: quiet speech still shows
+        return ([0.0] * bars + heard)[-bars:]
 
     def _has_audio(self) -> bool:
         try:

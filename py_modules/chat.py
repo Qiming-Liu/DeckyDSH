@@ -111,6 +111,8 @@ class ChatService:
         # dsh's replies and updates arrive on a reader thread that needs it.
         self._lock = threading.RLock()
         self._start_lock = threading.Lock()
+        # One session/resume at a time, so prepare and send never resume the same chat twice.
+        self._resume_lock = threading.Lock()
         self._process: acp.AcpProcess | None = None
         self._preset = plugin_settings.load()["default_permission"]
         self._live: set[str] = set()
@@ -227,6 +229,30 @@ class ChatService:
                     "items": items, "usage": chat.usage, "model": chat.meta.get("model", ""),
                     "preset": chat.meta.get("preset", self._preset), "starred": chat.meta.get("starred", False)}
 
+    def _ensure_live(self, session_id: str, chat: "Chat") -> acp.AcpProcess:
+        """dsh running with this chat's session loaded, resuming it if this dsh has not seen it."""
+        process = self._ensure_process()
+        with self._resume_lock:
+            with self._lock:
+                live = session_id in self._live and self._process is process
+            if not live:
+                try:
+                    process.request("session/resume", {"sessionId": session_id, "cwd": chat.meta["cwd"],
+                                                       "mcpServers": []}).result(REQUEST_TIMEOUT)
+                except Exception as error:
+                    raise ChatError("resume_failed", str(error)) from error
+                with self._lock:
+                    self._live.add(session_id)
+        return process
+
+    def prepare(self, session_id: str) -> None:
+        """Start dsh and load the shown chat ahead of time, so sending it needs no wait."""
+        with self._lock:
+            chat = self._chat(session_id)
+            if chat.busy:
+                return
+        self._ensure_live(session_id, chat)
+
     def send(self, session_id: str, text: str, files: list[str] | None = None) -> dict:
         text = text.strip()
         files = [path for path in (files or []) if isinstance(path, str) and posixpath.isabs(path)]
@@ -238,17 +264,7 @@ class ChatService:
                 raise ChatError("busy")
             chat.busy = True  # Held while dsh starts or resumes, so a second send is refused.
         try:
-            process = self._ensure_process()
-            with self._lock:
-                live = session_id in self._live
-            if not live:
-                try:
-                    process.request("session/resume", {"sessionId": session_id, "cwd": chat.meta["cwd"],
-                                                       "mcpServers": []}).result(REQUEST_TIMEOUT)
-                except Exception as error:
-                    raise ChatError("resume_failed", str(error)) from error
-                with self._lock:
-                    self._live.add(session_id)
+            process = self._ensure_live(session_id, chat)
         except Exception:
             with self._lock:
                 chat.busy = False

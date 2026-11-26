@@ -29,5 +29,6 @@ export const PAGE_CSS = `
 [data-dsh-root] { background: linear-gradient(180deg, #0e141b 0%, #151c24 100%) !important; }
 [data-dsh-root] > .PageListColumn { background: rgba(0,0,0,.18) !important; }
 [data-dsh-root] > .DialogContentTransition { background: transparent !important; }
+[data-dsh-root] .DialogContent:has([data-dsh-about]) { overflow-y: hidden !important; padding-bottom: 0 !important; }
 .DialogContent.dsh-dialog { width: 640px; max-width: 100%; box-sizing: border-box; padding: 28px 32px 24px !important; border-radius: 6px; background: #1f2126 !important; box-shadow: 0 24px 60px rgba(0,0,0,.6); }
 `;
